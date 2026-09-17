@@ -8,7 +8,7 @@ import "./style.css";
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 
 type MaskSettings = { color: string; transparency: number };
-type SavedSettings = MaskSettings & { minTransparency: number; scheduleEnabled: boolean; scheduleStart: string; scheduleEnd: string; shortcut: string };
+type SavedSettings = MaskSettings & { minTransparency: number; confirmationEnabled: boolean; scheduleEnabled: boolean; scheduleStart: string; scheduleEnd: string; shortcut: string };
 type Preset = MaskSettings & { id: string; name: string };
 
 const SETTINGS_KEY = "desk-mask.settings";
@@ -32,12 +32,14 @@ const loadSettings = (): SavedSettings => {
   const value = read<Partial<SavedSettings & { opacity: number }>>(SETTINGS_KEY, {});
   const schedule = read<Partial<Pick<SavedSettings, "scheduleEnabled" | "scheduleStart" | "scheduleEnd">>>(SCHEDULE_KEY, value);
   const transparency = value.transparency ?? (typeof value.opacity === "number" ? 100 - value.opacity : 65);
-  return { color: value.color ?? "#000000", transparency: clamp(transparency), minTransparency: clamp(value.minTransparency ?? 20, 0, 50), scheduleEnabled: schedule.scheduleEnabled ?? false, scheduleStart: schedule.scheduleStart ?? "22:00", scheduleEnd: schedule.scheduleEnd ?? "07:00", shortcut: value.shortcut ?? "CommandOrControl+Shift+M" };
+  return { color: value.color ?? "#000000", transparency: clamp(transparency), minTransparency: clamp(value.minTransparency ?? 20, 0, 50), confirmationEnabled: value.confirmationEnabled ?? true, scheduleEnabled: schedule.scheduleEnabled ?? false, scheduleStart: schedule.scheduleStart ?? "22:00", scheduleEnd: schedule.scheduleEnd ?? "07:00", shortcut: value.shortcut ?? "CommandOrControl+Shift+M" };
 };
 const loadPresets = (): Preset[] => read<Array<Partial<Preset & { opacity: number }>>>(PRESETS_KEY, defaultPresets)
   .map((preset, index) => ({ id: preset.id ?? crypto.randomUUID(), name: preset.name ?? `预设 ${index + 1}`, color: preset.color ?? "#000000", transparency: clamp(preset.transparency ?? (typeof preset.opacity === "number" ? 100 - preset.opacity : 65)) }));
 let settings = loadSettings();
 let presets = loadPresets();
+// “全部显示器”的基准参数不能随着单屏编辑器切换而变化。
+let defaultDisplaySettings: MaskSettings = { color: settings.color, transparency: settings.transparency };
 
 function paintOverlay(next: MaskSettings) {
   document.documentElement.style.setProperty("--mask-color", next.color);
@@ -49,7 +51,7 @@ if (isOverlay) {
   document.body.innerHTML = '<div class="mask"></div>';
   paintOverlay(settings);
   // 新窗口的事件监听器可能在 Rust 第一次广播后才就绪，因此主动获取一次当前状态。
-  Promise.all([invoke<MaskSettings>("get_mask_settings"), invoke<boolean>("get_mask_visible")])
+  Promise.all([invoke<MaskSettings>("get_mask_settings"), invoke<boolean>("is_mask_visible")])
     .then(([nextSettings, visible]) => {
       paintOverlay(nextSettings);
       document.documentElement.classList.toggle("mask-visible", visible);
@@ -70,13 +72,16 @@ if (isOverlay) {
       </aside>
       <main>
         <section class="page active" data-page-content="mask"><header><div><p class="eyebrow">MASK CONTROL</p><h1>遮罩</h1></div></header>
+          <section class="card display-card"><div class="display-heading">应用范围 <small class="developing-tip">多屏配置开发中</small></div><div id="display-target" class="display-target" role="radiogroup" aria-label="应用范围"></div></section>
           <section class="card control-card"><label class="switch-row"><span><strong>应用遮罩</strong><small id="mask-status">遮罩当前未启用</small></span><input id="mask-switch" class="switch" type="checkbox" /></label></section>
-          <section class="card"><div class="section-title"><h2>实时预览</h2></div><div id="preview"><span>你的屏幕会呈现这样的遮罩效果</span></div>
+          <section id="all-displays-note" class="card all-displays-note" hidden></section>
+          <section class="card screen-config"><div class="section-title"><h2>实时预览</h2></div><div id="preview"><span>你的屏幕会呈现这样的遮罩效果</span></div>
             <label>遮罩颜色 <input id="color" type="color" /></label><label><span>透明度 <output id="opacity-label"></output></span><input id="transparency" class="wide-range" type="range" min="0" step="1" /></label></section>
-          <section class="card"><div class="section-title"><h2>预设</h2><button id="save" class="text-button">保存配置</button></div><div id="presets" class="preset-list"></div></section>
+          <section class="card screen-config"><div class="section-title"><h2>预设</h2><button id="save" class="text-button">保存配置</button></div><div id="presets" class="preset-list"></div></section>
         </section>
         <section class="page" data-page-content="settings"><header><div><p class="eyebrow">PREFERENCES</p><h1>设置</h1></div></header>
           <section class="card"><label><span>透明度下限 <output id="min-transparency-label"></output></span><input id="min-transparency" class="wide-range" type="range" min="0" max="50" step="1" /></label></section>
+          <section class="card compact"><label class="switch-row"><span><strong>应用前确认</strong><small>开启遮罩后显示 10 秒确认弹窗</small></span><input id="confirmation-enabled" class="switch" type="checkbox" /></label></section>
           <section class="card compact"><label class="switch-row"><span><strong>开机启动</strong><small>在系统登录后运行 Desk Mask</small></span><input id="autostart" class="switch" type="checkbox" /></label><label class="switch-row"><span><strong>启动后自动显示遮罩</strong><small>使用上次保存的颜色和透明度</small></span><input id="start-visible" class="switch" type="checkbox" /></label></section>
           <section class="card compact"><div class="shortcut-row"><span><strong>遮罩快捷键</strong><small id="shortcut-value"></small></span><button id="record-shortcut" class="secondary">录入</button></div></section>
           <section class="card compact"><label class="switch-row"><span><strong>定时启用</strong><small>在指定时段自动应用遮罩</small></span><input id="schedule-enabled" class="switch" type="checkbox" /></label><div id="schedule-times" class="time-row"><label>开始时间<input id="schedule-start" type="time" /></label><label>结束时间<input id="schedule-end" type="time" /></label></div></section>
@@ -102,10 +107,14 @@ if (isOverlay) {
     </div>`;
 
   const color = document.querySelector<HTMLInputElement>("#color")!;
+  const displayTarget = document.querySelector<HTMLDivElement>("#display-target")!;
   const transparency = document.querySelector<HTMLInputElement>("#transparency")!;
   const minTransparency = document.querySelector<HTMLInputElement>("#min-transparency")!;
   const minTransparencyLabel = document.querySelector<HTMLElement>("#min-transparency-label")!;
+  const confirmationEnabled = document.querySelector<HTMLInputElement>("#confirmation-enabled")!;
   const preview = document.querySelector<HTMLDivElement>("#preview")!;
+  const allDisplaysNote = document.querySelector<HTMLElement>("#all-displays-note")!;
+  const screenConfigCards = document.querySelectorAll<HTMLElement>(".screen-config");
   const opacityLabel = document.querySelector<HTMLOutputElement>("#opacity-label")!;
   const maskSwitch = document.querySelector<HTMLInputElement>("#mask-switch")!;
   const maskStatus = document.querySelector<HTMLElement>("#mask-status")!;
@@ -125,6 +134,17 @@ if (isOverlay) {
   let countdownTimer: number | undefined;
   let syncTimer: number | undefined;
   let activeShortcut: string | undefined;
+  function rememberSelectedMaskSettings() {
+    defaultDisplaySettings = maskSettings();
+  }
+  function renderConfigurationMode() {
+    allDisplaysNote.hidden = true;
+    screenConfigCards.forEach((card) => { card.hidden = false; });
+  }
+  function renderDisplayTarget() {
+    const groupIcon = '<svg viewBox="0 0 32 24" aria-hidden="true"><rect x="2" y="3" width="19" height="14" rx="2"/><path d="M11.5 17v4m-4 0h8"/><rect x="18" y="8" width="12" height="9" rx="1.5"/></svg>';
+    displayTarget.innerHTML = `<button class="display-option active" disabled role="radio" aria-checked="true">${groupIcon}<span>全部</span></button>`;
+  }
 
   function renderSettings() {
     color.value = settings.color;
@@ -141,13 +161,20 @@ if (isOverlay) {
     preview.style.setProperty("--preview-opacity", String(1 - settings.transparency / 100));
   }
   const maskSettings = (): MaskSettings => ({ color: settings.color, transparency: settings.transparency });
+  async function syncSettingsFor(next: MaskSettings) {
+    await invoke("update_mask_settings", { settings: next });
+  }
   async function syncSettings() {
     if (syncTimer) window.clearTimeout(syncTimer);
-    await invoke("update_mask_settings", { settings: maskSettings() });
+    rememberSelectedMaskSettings();
+    const next = { ...defaultDisplaySettings };
+    await syncSettingsFor(next);
   }
   function queueSyncSettings() {
     if (syncTimer) window.clearTimeout(syncTimer);
-    syncTimer = window.setTimeout(() => { void invoke("update_mask_settings", { settings: maskSettings() }); }, 50);
+    // 记录此刻的目标屏幕和参数；用户立刻切换显示器也不能让改动串屏。
+    const next = { ...defaultDisplaySettings };
+    syncTimer = window.setTimeout(() => { void syncSettingsFor(next); }, 50);
   }
   const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
   function renderPresets() {
@@ -159,6 +186,7 @@ if (isOverlay) {
     maskSwitch.checked = visible;
     maskStatus.textContent = visible ? "遮罩正在应用" : "遮罩当前未启用";
   }
+  void listen<boolean>("mask-status-changed", () => { void refreshVisibility(); });
   function closeDialog() {
     if (countdownTimer) window.clearInterval(countdownTimer);
     countdownTimer = undefined;
@@ -212,19 +240,25 @@ if (isOverlay) {
     write(SETTINGS_KEY, { ...loadSettings(), shortcut });
   }
 
-  color.addEventListener("input", () => { settings.color = color.value; queueSyncSettings(); renderSettings(); });
-  transparency.addEventListener("input", () => { settings.transparency = Number(transparency.value); queueSyncSettings(); renderSettings(); });
-  minTransparency.addEventListener("input", () => { settings.minTransparency = Number(minTransparency.value); queueSyncSettings(); renderSettings(); });
+  color.addEventListener("input", () => { settings.color = color.value; rememberSelectedMaskSettings(); queueSyncSettings(); renderSettings(); });
+  transparency.addEventListener("input", () => { settings.transparency = Number(transparency.value); rememberSelectedMaskSettings(); queueSyncSettings(); renderSettings(); });
+  minTransparency.addEventListener("input", () => { settings.minTransparency = Number(minTransparency.value); renderSettings(); });
+  confirmationEnabled.checked = settings.confirmationEnabled;
+  confirmationEnabled.addEventListener("change", () => {
+    settings.confirmationEnabled = confirmationEnabled.checked;
+    // 只提交确认偏好，避免把未确认的遮罩外观一并保存。
+    write(SETTINGS_KEY, { ...loadSettings(), confirmationEnabled: settings.confirmationEnabled });
+  });
   async function toggleMask(next: boolean, needsConfirmation: boolean) {
     if (!next) closeDialog();
     await syncSettings();
     await invoke("set_mask_visible", { visible: next });
     await refreshVisibility();
-    if (next && needsConfirmation) openSaveDialog();
+    if (next && needsConfirmation && settings.confirmationEnabled) openSaveDialog();
   }
   maskSwitch.addEventListener("change", () => { void toggleMask(maskSwitch.checked, true); });
   document.querySelector("#save-and-keep")!.addEventListener("click", () => {
-    write(SETTINGS_KEY, settings);
+    write(SETTINGS_KEY, { ...settings, color: defaultDisplaySettings.color, transparency: defaultDisplaySettings.transparency });
     closeDialog();
   });
   document.querySelector("#keep-unsaved")!.addEventListener("click", () => { void cancelUnconfirmedMask(); });
@@ -254,7 +288,7 @@ if (isOverlay) {
     const target = event.target as HTMLElement;
     const apply = target.closest<HTMLElement>("[data-apply]")?.dataset.apply;
     const remove = target.closest<HTMLElement>("[data-delete]")?.dataset.delete;
-    if (apply) { const preset = presets.find((item) => item.id === apply); if (preset) { settings = { ...settings, color: preset.color, transparency: Math.max(preset.transparency, settings.minTransparency) }; await syncSettings(); renderSettings(); } }
+    if (apply) { const preset = presets.find((item) => item.id === apply); if (preset) { settings = { ...settings, color: preset.color, transparency: Math.max(preset.transparency, settings.minTransparency) }; rememberSelectedMaskSettings(); await syncSettings(); renderSettings(); } }
     if (remove) { presets = presets.filter((item) => item.id !== remove); write(PRESETS_KEY, presets); renderPresets(); }
   });
   autostart.addEventListener("change", async () => { if (autostart.checked) await enable(); else await disable(); });
@@ -299,9 +333,10 @@ if (isOverlay) {
     }
   });
   void applyShortcut(settings.shortcut).catch(() => { shortcutValue.textContent = "快捷键注册失败"; });
+  renderDisplayTarget();
   void applySchedule();
   window.setInterval(() => { void applySchedule(); }, 30_000);
   // 处理外接显示器连接、断开或分辨率/排列变化；隐藏遮罩时原生层会快速返回。
   window.setInterval(() => { void invoke("refresh_overlays"); }, 3000);
-  renderSettings(); renderPresets();
+  renderConfigurationMode(); renderSettings(); renderPresets();
 }
