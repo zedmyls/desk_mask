@@ -1,0 +1,23 @@
+[package]
+name = "desk-mask"
+version = "0.1.0"
+description = "跨平台桌面遮罩"
+authors = ["Desk Mask"]
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "desk_mask_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "desk-mask"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2.11.0", features = ["macos-private-api"] }
+tauri-plugin-autostart = "2.5.1"
+serde = { version = "1", features = ["derive"] }
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
