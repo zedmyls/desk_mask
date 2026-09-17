@@ -15,8 +15,9 @@ name = "desk-mask"
 path = "src/main.rs"
 
 [dependencies]
-tauri = { version = "2.11.0", features = ["macos-private-api"] }
+tauri = { version = "2.11.0", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-autostart = "2.5.1"
+tauri-plugin-global-shortcut = "2.3.1"
 serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]

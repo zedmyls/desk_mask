@@ -1,15 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
+import wizardHat from "./wizard-hat.png";
 import "./style.css";
 
 document.addEventListener("contextmenu", (event) => event.preventDefault());
 
 type MaskSettings = { color: string; transparency: number };
-type SavedSettings = MaskSettings & { minTransparency: number };
+type SavedSettings = MaskSettings & { minTransparency: number; scheduleEnabled: boolean; scheduleStart: string; scheduleEnd: string; shortcut: string };
 type Preset = MaskSettings & { id: string; name: string };
 
 const SETTINGS_KEY = "desk-mask.settings";
+const SCHEDULE_KEY = "desk-mask.schedule";
 const PRESETS_KEY = "desk-mask.presets";
 const START_VISIBLE_KEY = "desk-mask.start-visible";
 const isOverlay = new URLSearchParams(window.location.search).has("overlay");
@@ -27,8 +30,9 @@ const write = (key: string, value: unknown) => localStorage.setItem(key, JSON.st
 const clamp = (value: number, min = 0, max = 100) => Math.min(max, Math.max(min, value));
 const loadSettings = (): SavedSettings => {
   const value = read<Partial<SavedSettings & { opacity: number }>>(SETTINGS_KEY, {});
+  const schedule = read<Partial<Pick<SavedSettings, "scheduleEnabled" | "scheduleStart" | "scheduleEnd">>>(SCHEDULE_KEY, value);
   const transparency = value.transparency ?? (typeof value.opacity === "number" ? 100 - value.opacity : 65);
-  return { color: value.color ?? "#000000", transparency: clamp(transparency), minTransparency: clamp(value.minTransparency ?? 20, 0, 50) };
+  return { color: value.color ?? "#000000", transparency: clamp(transparency), minTransparency: clamp(value.minTransparency ?? 20, 0, 50), scheduleEnabled: schedule.scheduleEnabled ?? false, scheduleStart: schedule.scheduleStart ?? "22:00", scheduleEnd: schedule.scheduleEnd ?? "07:00", shortcut: value.shortcut ?? "CommandOrControl+Shift+M" };
 };
 const loadPresets = (): Preset[] => read<Array<Partial<Preset & { opacity: number }>>>(PRESETS_KEY, defaultPresets)
   .map((preset, index) => ({ id: preset.id ?? crypto.randomUUID(), name: preset.name ?? `预设 ${index + 1}`, color: preset.color ?? "#000000", transparency: clamp(preset.transparency ?? (typeof preset.opacity === "number" ? 100 - preset.opacity : 65)) }));
@@ -45,12 +49,17 @@ if (isOverlay) {
   document.body.innerHTML = '<div class="mask"></div>';
   paintOverlay(settings);
   // 新窗口的事件监听器可能在 Rust 第一次广播后才就绪，因此主动获取一次当前状态。
-  invoke<MaskSettings>("get_mask_settings").then(paintOverlay);
+  Promise.all([invoke<MaskSettings>("get_mask_settings"), invoke<boolean>("get_mask_visible")])
+    .then(([nextSettings, visible]) => {
+      paintOverlay(nextSettings);
+      document.documentElement.classList.toggle("mask-visible", visible);
+    });
   listen<MaskSettings>("mask-settings", (event) => paintOverlay(event.payload));
+  listen<boolean>("mask-visibility", (event) => document.documentElement.classList.toggle("mask-visible", event.payload));
 } else {
   document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="app-shell">
-      <aside class="sidebar"><div class="brand"><span class="brand-mark">◐</span><span>Desk Mask</span></div>
+      <aside class="sidebar"><div class="brand"><span class="brand-mark"><img src="${wizardHat}" alt="Desk Mask" /></span><span>Desk Mask</span></div>
         <nav aria-label="主菜单">
           <button class="nav-item active" data-page="mask"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9c0-5-4-9-9-9Z"/><path d="M12 3v18a9 9 0 0 0 0-18Z"/></svg>遮罩</button>
           <button class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 17h14M8 12h11"/><circle cx="8" cy="7" r="2"/><circle cx="16" cy="17" r="2"/><circle cx="11" cy="12" r="2"/></svg>设置</button>
@@ -69,6 +78,8 @@ if (isOverlay) {
         <section class="page" data-page-content="settings"><header><div><p class="eyebrow">PREFERENCES</p><h1>设置</h1></div></header>
           <section class="card"><label><span>透明度下限 <output id="min-transparency-label"></output></span><input id="min-transparency" class="wide-range" type="range" min="0" max="50" step="1" /></label></section>
           <section class="card compact"><label class="switch-row"><span><strong>开机启动</strong><small>在系统登录后运行 Desk Mask</small></span><input id="autostart" class="switch" type="checkbox" /></label><label class="switch-row"><span><strong>启动后自动显示遮罩</strong><small>使用上次保存的颜色和透明度</small></span><input id="start-visible" class="switch" type="checkbox" /></label></section>
+          <section class="card compact"><div class="shortcut-row"><span><strong>遮罩快捷键</strong><small id="shortcut-value"></small></span><button id="record-shortcut" class="secondary">录入</button></div></section>
+          <section class="card compact"><label class="switch-row"><span><strong>定时启用</strong><small>在指定时段自动应用遮罩</small></span><input id="schedule-enabled" class="switch" type="checkbox" /></label><div id="schedule-times" class="time-row"><label>开始时间<input id="schedule-start" type="time" /></label><label>结束时间<input id="schedule-end" type="time" /></label></div></section>
         </section>
         <section class="page" data-page-content="help"><header><div><p class="eyebrow">GUIDE</p><h1>说明</h1></div></header><section class="card prose"><h2>如何使用</h2><p>在“遮罩”页面选择颜色和透明度，再打开“应用遮罩”开关。确认弹窗在 10 秒内未得到处理时，遮罩会自动关闭。</p><h2>适用范围</h2><p>适用于桌面、视频和无边框全屏应用。独占全屏游戏及部分 DRM 内容可能无法被普通窗口覆盖。</p></section></section>
         <section class="page" data-page-content="author"><header><div><p class="eyebrow">ABOUT</p><h1>关于作者</h1></div></header><section class="card prose"><h2>Desk Mask</h2><p>一个专注于减少屏幕视觉刺激的跨平台桌面工具。</p><p class="hint">当前版本为本地优先设计：你的颜色、预设和启动选项仅保存在此设备上。</p></section></section>
@@ -100,6 +111,12 @@ if (isOverlay) {
   const maskStatus = document.querySelector<HTMLElement>("#mask-status")!;
   const autostart = document.querySelector<HTMLInputElement>("#autostart")!;
   const startVisible = document.querySelector<HTMLInputElement>("#start-visible")!;
+  const scheduleEnabled = document.querySelector<HTMLInputElement>("#schedule-enabled")!;
+  const scheduleStart = document.querySelector<HTMLInputElement>("#schedule-start")!;
+  const scheduleEnd = document.querySelector<HTMLInputElement>("#schedule-end")!;
+  const scheduleTimes = document.querySelector<HTMLDivElement>("#schedule-times")!;
+  const shortcutValue = document.querySelector<HTMLElement>("#shortcut-value")!;
+  const recordShortcut = document.querySelector<HTMLButtonElement>("#record-shortcut")!;
   const dialog = document.querySelector<HTMLDivElement>("#save-dialog")!;
   const presetDialog = document.querySelector<HTMLDivElement>("#preset-dialog")!;
   const presetForm = document.querySelector<HTMLFormElement>("#preset-form")!;
@@ -107,6 +124,7 @@ if (isOverlay) {
   const countdown = document.querySelector<HTMLElement>("#countdown")!;
   let countdownTimer: number | undefined;
   let syncTimer: number | undefined;
+  let activeShortcut: string | undefined;
 
   function renderSettings() {
     color.value = settings.color;
@@ -162,18 +180,49 @@ if (isOverlay) {
       if (seconds <= 0) void cancelUnconfirmedMask();
     }, 1000);
   }
+  async function applySchedule() {
+    if (!settings.scheduleEnabled) return;
+    const now = new Date();
+    const current = now.getHours() * 60 + now.getMinutes();
+    const [startHour, startMinute] = settings.scheduleStart.split(":").map(Number);
+    const [endHour, endMinute] = settings.scheduleEnd.split(":").map(Number);
+    const start = startHour * 60 + startMinute;
+    const end = endHour * 60 + endMinute;
+    const shouldShow = start === end || (start < end ? current >= start && current < end : current >= start || current < end);
+    const visible = await invoke<boolean>("is_mask_visible");
+    if (visible !== shouldShow) {
+      await invoke("set_mask_visible", { visible: shouldShow });
+      await refreshVisibility();
+    }
+  }
+  async function applyShortcut(shortcut: string) {
+    if (shortcut === activeShortcut) return;
+    await register(shortcut, (event) => {
+      if (event.state === "Pressed") {
+        const next = !maskSwitch.checked;
+        maskSwitch.checked = next;
+        void toggleMask(next, false);
+      }
+    });
+    // 新组合键注册成功后才释放旧组合键；失败时旧快捷键仍可正常使用。
+    if (activeShortcut) await unregister(activeShortcut);
+    activeShortcut = shortcut;
+    settings.shortcut = shortcut;
+    shortcutValue.textContent = shortcut.replace("CommandOrControl", "Cmd/Ctrl");
+    write(SETTINGS_KEY, { ...loadSettings(), shortcut });
+  }
 
   color.addEventListener("input", () => { settings.color = color.value; queueSyncSettings(); renderSettings(); });
   transparency.addEventListener("input", () => { settings.transparency = Number(transparency.value); queueSyncSettings(); renderSettings(); });
   minTransparency.addEventListener("input", () => { settings.minTransparency = Number(minTransparency.value); queueSyncSettings(); renderSettings(); });
-  maskSwitch.addEventListener("change", async () => {
-    const next = maskSwitch.checked;
+  async function toggleMask(next: boolean, needsConfirmation: boolean) {
     if (!next) closeDialog();
     await syncSettings();
     await invoke("set_mask_visible", { visible: next });
     await refreshVisibility();
-    if (next) openSaveDialog();
-  });
+    if (next && needsConfirmation) openSaveDialog();
+  }
+  maskSwitch.addEventListener("change", () => { void toggleMask(maskSwitch.checked, true); });
   document.querySelector("#save-and-keep")!.addEventListener("click", () => {
     write(SETTINGS_KEY, settings);
     closeDialog();
@@ -211,13 +260,47 @@ if (isOverlay) {
   autostart.addEventListener("change", async () => { if (autostart.checked) await enable(); else await disable(); });
   startVisible.checked = read<boolean>(START_VISIBLE_KEY, false);
   startVisible.addEventListener("change", () => write(START_VISIBLE_KEY, startVisible.checked));
+  const saveSchedule = () => {
+    // 定时偏好与需要确认的遮罩外观分开保存，避免意外提交未确认的颜色/透明度。
+    write(SCHEDULE_KEY, { scheduleEnabled: settings.scheduleEnabled, scheduleStart: settings.scheduleStart, scheduleEnd: settings.scheduleEnd });
+    void applySchedule();
+  };
+  scheduleEnabled.checked = settings.scheduleEnabled;
+  scheduleStart.value = settings.scheduleStart;
+  scheduleEnd.value = settings.scheduleEnd;
+  scheduleTimes.hidden = !settings.scheduleEnabled;
+  scheduleEnabled.addEventListener("change", () => { settings.scheduleEnabled = scheduleEnabled.checked; scheduleTimes.hidden = !scheduleEnabled.checked; saveSchedule(); });
+  scheduleStart.addEventListener("change", () => { settings.scheduleStart = scheduleStart.value; saveSchedule(); });
+  scheduleEnd.addEventListener("change", () => { settings.scheduleEnd = scheduleEnd.value; saveSchedule(); });
+  recordShortcut.addEventListener("click", () => {
+    recordShortcut.textContent = "请按快捷键";
+    const capture = (event: KeyboardEvent) => {
+      event.preventDefault();
+      const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+      if (!(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) || ["Control", "Meta", "Alt", "Shift"].includes(key)) return;
+      const parts = [event.metaKey || event.ctrlKey ? "CommandOrControl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : "", key].filter(Boolean);
+      void applyShortcut(parts.join("+")).catch(() => { shortcutValue.textContent = "该组合键不可用"; });
+      recordShortcut.textContent = "录入";
+      window.removeEventListener("keydown", capture, true);
+    };
+    window.addEventListener("keydown", capture, true);
+  });
   Promise.all([isEnabled(), refreshVisibility()]).then(async ([enabled]) => {
     autostart.checked = enabled;
+    // 旧版本创建的自启动项没有 --autostart 参数；保留用户已开启的偏好，
+    // 同时将其原地升级为静默启动配置。
+    if (enabled) {
+      await disable();
+      await enable();
+    }
     if (startVisible.checked) {
       await invoke("set_mask_visible", { visible: true });
       await refreshVisibility();
     }
   });
+  void applyShortcut(settings.shortcut).catch(() => { shortcutValue.textContent = "快捷键注册失败"; });
+  void applySchedule();
+  window.setInterval(() => { void applySchedule(); }, 30_000);
   // 处理外接显示器连接、断开或分辨率/排列变化；隐藏遮罩时原生层会快速返回。
   window.setInterval(() => { void invoke("refresh_overlays"); }, 3000);
   renderSettings(); renderPresets();

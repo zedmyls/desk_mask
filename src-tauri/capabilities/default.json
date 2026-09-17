@@ -12,6 +12,9 @@
     "core:window:allow-set-size",
     "core:window:allow-show",
     "core:window:allow-hide",
-    "autostart:default"
+    "autostart:default",
+    "global-shortcut:default",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister-all"
   ]
 }
