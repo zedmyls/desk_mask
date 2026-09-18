@@ -6,7 +6,8 @@ use std::sync::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -119,6 +120,10 @@ fn set_mask_visible_impl(app: AppHandle, state: &MaskState, visible: bool) -> Re
     let generation = state.visibility_generation.fetch_add(1, Ordering::SeqCst) + 1;
     update_tray_state(&app, visible);
     if let Some(main) = app.get_webview_window("main") {
+        // The confirmation dialog belongs to the main webview. Keep that native
+        // window above the native overlay; CSS z-index cannot cross windows.
+        main.set_always_on_top(visible)
+            .map_err(|error| error.to_string())?;
         let _ = main.emit("mask-status-changed", visible);
     }
     let mut windows = Vec::new();
@@ -156,11 +161,34 @@ fn set_mask_visible(
     state: State<'_, MaskState>,
     visible: bool,
 ) -> Result<(), String> {
-    set_mask_visible_impl(app, &state, visible)
+    set_mask_visible_impl(app, &state, visible).map_err(|error| {
+        eprintln!(
+            "Desk Mask: failed to {} mask: {error}",
+            if visible { "show" } else { "hide" }
+        );
+        error
+    })
 }
 #[tauri::command]
 fn is_mask_visible(state: State<'_, MaskState>) -> bool {
     get_mask_visible(state)
+}
+
+/// The overlay webview can finish loading after the first visibility event was
+/// emitted. Let it request a fresh snapshot so it cannot remain transparent
+/// because that first event was missed (especially noticeable on Windows).
+#[tauri::command]
+fn overlay_ready(window: WebviewWindow, state: State<'_, MaskState>) -> Result<(), String> {
+    if !window.label().starts_with("overlay-") {
+        return Err("only overlay windows may request an overlay snapshot".into());
+    }
+    let runtime = state.runtime.lock().expect("mask state poisoned");
+    window
+        .emit("mask-settings", runtime.settings.clone())
+        .map_err(|error| error.to_string())?;
+    window
+        .emit("mask-visibility", runtime.visible)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -214,6 +242,11 @@ pub fn run() {
             visibility_generation: AtomicU64::new(0),
         })
         .setup(|app| {
+            // Windows 上在 WebView 的 IPC 回调内首次创建子 WebView 可能阻塞。
+            // 在应用启动阶段预创建隐藏遮罩窗口，后续开关只负责显示/隐藏。
+            if let Err(error) = create_overlays(&app.handle()) {
+                eprintln!("Desk Mask: failed to prepare overlay windows: {error}");
+            }
             if std::env::args().any(|argument| argument == "--autostart") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -250,11 +283,15 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "enable-mask" => {
                         let state = app.state::<MaskState>();
-                        let _ = set_mask_visible_impl(app.clone(), &state, true);
+                        if let Err(error) = set_mask_visible_impl(app.clone(), &state, true) {
+                            eprintln!("Desk Mask: failed to enable mask from tray: {error}");
+                        }
                     }
                     "disable-mask" => {
                         let state = app.state::<MaskState>();
-                        let _ = set_mask_visible_impl(app.clone(), &state, false);
+                        if let Err(error) = set_mask_visible_impl(app.clone(), &state, false) {
+                            eprintln!("Desk Mask: failed to disable mask from tray: {error}");
+                        }
                     }
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -274,6 +311,7 @@ pub fn run() {
             update_mask_settings,
             set_mask_visible,
             is_mask_visible,
+            overlay_ready,
             refresh_overlays
         ])
         .run(tauri::generate_context!())

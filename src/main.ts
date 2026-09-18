@@ -50,14 +50,14 @@ if (isOverlay) {
   document.documentElement.classList.add("overlay-window");
   document.body.innerHTML = '<div class="mask"></div>';
   paintOverlay(settings);
-  // 新窗口的事件监听器可能在 Rust 第一次广播后才就绪，因此主动获取一次当前状态。
-  Promise.all([invoke<MaskSettings>("get_mask_settings"), invoke<boolean>("is_mask_visible")])
-    .then(([nextSettings, visible]) => {
-      paintOverlay(nextSettings);
-      document.documentElement.classList.toggle("mask-visible", visible);
-    });
-  listen<MaskSettings>("mask-settings", (event) => paintOverlay(event.payload));
-  listen<boolean>("mask-visibility", (event) => document.documentElement.classList.toggle("mask-visible", event.payload));
+  void (async () => {
+    await Promise.all([
+      listen<MaskSettings>("mask-settings", (event) => paintOverlay(event.payload)),
+      listen<boolean>("mask-visibility", (event) => document.documentElement.classList.toggle("mask-visible", event.payload))
+    ]);
+    // 监听器先就绪，再由这个窗口主动索取当前快照，避免创建窗口时的首次事件丢失。
+    await invoke("overlay_ready");
+  })().catch((error) => console.error("Desk Mask: overlay initialization failed", error));
 } else {
   document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
     <div class="app-shell">
@@ -186,6 +186,12 @@ if (isOverlay) {
     maskSwitch.checked = visible;
     maskStatus.textContent = visible ? "遮罩正在应用" : "遮罩当前未启用";
   }
+  function showMaskError(error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("Desk Mask: mask operation failed", error);
+    maskSwitch.checked = false;
+    maskStatus.textContent = `遮罩启用失败：${detail}`;
+  }
   void listen<boolean>("mask-status-changed", () => { void refreshVisibility(); });
   function closeDialog() {
     if (countdownTimer) window.clearInterval(countdownTimer);
@@ -250,11 +256,18 @@ if (isOverlay) {
     write(SETTINGS_KEY, { ...loadSettings(), confirmationEnabled: settings.confirmationEnabled });
   });
   async function toggleMask(next: boolean, needsConfirmation: boolean) {
-    if (!next) closeDialog();
-    await syncSettings();
-    await invoke("set_mask_visible", { visible: next });
-    await refreshVisibility();
-    if (next && needsConfirmation && settings.confirmationEnabled) openSaveDialog();
+    try {
+      if (!next) closeDialog();
+      maskStatus.textContent = next ? "正在启用遮罩…" : "正在关闭遮罩…";
+      // 参数同步不应阻塞开关本身或确认弹窗；遮罩会先使用当前/默认值显示，
+      // 随后立即收到最新颜色和透明度。
+      void syncSettings().catch((error) => console.error("Desk Mask: settings sync failed", error));
+      await invoke("set_mask_visible", { visible: next });
+      await refreshVisibility();
+      if (next && needsConfirmation && settings.confirmationEnabled) openSaveDialog();
+    } catch (error) {
+      showMaskError(error);
+    }
   }
   maskSwitch.addEventListener("change", () => { void toggleMask(maskSwitch.checked, true); });
   document.querySelector("#save-and-keep")!.addEventListener("click", () => {
