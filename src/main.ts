@@ -15,6 +15,7 @@ const SETTINGS_KEY = "desk-mask.settings";
 const SCHEDULE_KEY = "desk-mask.schedule";
 const PRESETS_KEY = "desk-mask.presets";
 const START_VISIBLE_KEY = "desk-mask.start-visible";
+const DEFAULT_SHORTCUT = "CommandOrControl+Shift+M";
 const isOverlay = new URLSearchParams(window.location.search).has("overlay");
 
 const defaultPresets: Preset[] = [
@@ -32,7 +33,7 @@ const loadSettings = (): SavedSettings => {
   const value = read<Partial<SavedSettings & { opacity: number }>>(SETTINGS_KEY, {});
   const schedule = read<Partial<Pick<SavedSettings, "scheduleEnabled" | "scheduleStart" | "scheduleEnd">>>(SCHEDULE_KEY, value);
   const transparency = value.transparency ?? (typeof value.opacity === "number" ? 100 - value.opacity : 65);
-  return { color: value.color ?? "#000000", transparency: clamp(transparency), minTransparency: clamp(value.minTransparency ?? 20, 0, 50), confirmationEnabled: value.confirmationEnabled ?? true, scheduleEnabled: schedule.scheduleEnabled ?? false, scheduleStart: schedule.scheduleStart ?? "22:00", scheduleEnd: schedule.scheduleEnd ?? "07:00", shortcut: value.shortcut ?? "CommandOrControl+Shift+M" };
+  return { color: value.color ?? "#000000", transparency: clamp(transparency), minTransparency: clamp(value.minTransparency ?? 20, 0, 50), confirmationEnabled: value.confirmationEnabled ?? true, scheduleEnabled: schedule.scheduleEnabled ?? false, scheduleStart: schedule.scheduleStart ?? "22:00", scheduleEnd: schedule.scheduleEnd ?? "07:00", shortcut: value.shortcut ?? DEFAULT_SHORTCUT };
 };
 const loadPresets = (): Preset[] => read<Array<Partial<Preset & { opacity: number }>>>(PRESETS_KEY, defaultPresets)
   .map((preset, index) => ({ id: preset.id ?? crypto.randomUUID(), name: preset.name ?? `预设 ${index + 1}`, color: preset.color ?? "#000000", transparency: clamp(preset.transparency ?? (typeof preset.opacity === "number" ? 100 - preset.opacity : 65)) }));
@@ -104,6 +105,14 @@ if (isOverlay) {
           <div class="dialog-actions"><button id="cancel-preset" type="button" class="secondary">取消</button><button type="submit" class="primary">保存</button></div>
         </form>
       </section>
+    </div>
+    <div id="shortcut-dialog" class="dialog-backdrop" hidden>
+      <section class="dialog shortcut-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-dialog-title">
+        <p class="eyebrow">SHORTCUT</p><h2 id="shortcut-dialog-title">录入遮罩快捷键</h2>
+        <p>请按下恰好三个按键：两个修饰键和一个普通键。</p>
+        <div id="shortcut-capture" class="shortcut-capture" aria-live="polite">请按下三键组合</div>
+        <div class="dialog-actions"><button id="cancel-shortcut" class="secondary" type="button">取消</button><button id="save-shortcut" class="primary" type="button" disabled>保存</button></div>
+      </section>
     </div>`;
 
   const color = document.querySelector<HTMLInputElement>("#color")!;
@@ -131,9 +140,14 @@ if (isOverlay) {
   const presetForm = document.querySelector<HTMLFormElement>("#preset-form")!;
   const presetName = document.querySelector<HTMLInputElement>("#preset-name")!;
   const countdown = document.querySelector<HTMLElement>("#countdown")!;
+  const shortcutDialog = document.querySelector<HTMLDivElement>("#shortcut-dialog")!;
+  const shortcutCapture = document.querySelector<HTMLElement>("#shortcut-capture")!;
+  const saveShortcut = document.querySelector<HTMLButtonElement>("#save-shortcut")!;
   let countdownTimer: number | undefined;
   let syncTimer: number | undefined;
   let activeShortcut: string | undefined;
+  let pendingShortcut: string | undefined;
+  let isRecordingShortcut = false;
   function rememberSelectedMaskSettings() {
     defaultDisplaySettings = maskSettings();
   }
@@ -246,6 +260,58 @@ if (isOverlay) {
     write(SETTINGS_KEY, { ...loadSettings(), shortcut });
   }
 
+  const displayShortcut = (shortcut: string) => shortcut.replace("CommandOrControl", "Cmd/Ctrl").replaceAll("+", " + ");
+  async function restoreDefaultShortcut() {
+    settings.shortcut = DEFAULT_SHORTCUT;
+    try {
+      await applyShortcut(DEFAULT_SHORTCUT);
+    } catch {
+      // 即使系统暂时拒绝注册，也不显示技术性错误；界面与配置都回到默认值。
+      activeShortcut = undefined;
+      shortcutValue.textContent = displayShortcut(DEFAULT_SHORTCUT);
+      write(SETTINGS_KEY, { ...loadSettings(), shortcut: DEFAULT_SHORTCUT });
+    }
+  }
+  function finishShortcutRecording() {
+    isRecordingShortcut = false;
+    pendingShortcut = undefined;
+    shortcutDialog.hidden = true;
+    window.removeEventListener("keydown", captureShortcut, true);
+  }
+  function cancelShortcutRecording() {
+    finishShortcutRecording();
+  }
+  function captureShortcut(event: KeyboardEvent) {
+    if (!isRecordingShortcut) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      void cancelShortcutRecording();
+      return;
+    }
+    const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+    const parts = [
+      event.metaKey || event.ctrlKey ? "CommandOrControl" : "",
+      event.altKey ? "Alt" : "",
+      event.shiftKey ? "Shift" : "",
+      !["Control", "Meta", "Alt", "Shift"].includes(key) ? key : ""
+    ].filter(Boolean);
+    shortcutCapture.textContent = parts.length ? displayShortcut(parts.join("+")) : "请按下三键组合";
+    const hasModifier = event.metaKey || event.ctrlKey || event.altKey || event.shiftKey;
+    const hasKey = !["Control", "Meta", "Alt", "Shift"].includes(key);
+    pendingShortcut = hasModifier && hasKey && parts.length === 3 ? parts.join("+") : undefined;
+    saveShortcut.disabled = !pendingShortcut;
+  }
+  function openShortcutDialog() {
+    if (isRecordingShortcut) return;
+    pendingShortcut = undefined;
+    isRecordingShortcut = true;
+    shortcutCapture.textContent = "请按下三键组合";
+    saveShortcut.disabled = true;
+    shortcutDialog.hidden = false;
+    window.addEventListener("keydown", captureShortcut, true);
+  }
+
   color.addEventListener("input", () => { settings.color = color.value; rememberSelectedMaskSettings(); queueSyncSettings(); renderSettings(); });
   transparency.addEventListener("input", () => { settings.transparency = Number(transparency.value); rememberSelectedMaskSettings(); queueSyncSettings(); renderSettings(); });
   minTransparency.addEventListener("input", () => { settings.minTransparency = Number(minTransparency.value); renderSettings(); });
@@ -319,18 +385,19 @@ if (isOverlay) {
   scheduleEnabled.addEventListener("change", () => { settings.scheduleEnabled = scheduleEnabled.checked; scheduleTimes.hidden = !scheduleEnabled.checked; saveSchedule(); });
   scheduleStart.addEventListener("change", () => { settings.scheduleStart = scheduleStart.value; saveSchedule(); });
   scheduleEnd.addEventListener("change", () => { settings.scheduleEnd = scheduleEnd.value; saveSchedule(); });
-  recordShortcut.addEventListener("click", () => {
-    recordShortcut.textContent = "请按快捷键";
-    const capture = (event: KeyboardEvent) => {
-      event.preventDefault();
-      const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
-      if (!(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) || ["Control", "Meta", "Alt", "Shift"].includes(key)) return;
-      const parts = [event.metaKey || event.ctrlKey ? "CommandOrControl" : "", event.altKey ? "Alt" : "", event.shiftKey ? "Shift" : "", key].filter(Boolean);
-      void applyShortcut(parts.join("+")).catch(() => { shortcutValue.textContent = "该组合键不可用"; });
-      recordShortcut.textContent = "录入";
-      window.removeEventListener("keydown", capture, true);
-    };
-    window.addEventListener("keydown", capture, true);
+  recordShortcut.addEventListener("click", openShortcutDialog);
+  document.querySelector("#cancel-shortcut")!.addEventListener("click", cancelShortcutRecording);
+  shortcutDialog.addEventListener("click", (event) => { if (event.target === shortcutDialog) cancelShortcutRecording(); });
+  saveShortcut.addEventListener("click", async () => {
+    if (!pendingShortcut) return;
+    saveShortcut.disabled = true;
+    try {
+      await applyShortcut(pendingShortcut);
+      finishShortcutRecording();
+    } catch {
+      await restoreDefaultShortcut();
+      finishShortcutRecording();
+    }
   });
   Promise.all([isEnabled(), refreshVisibility()]).then(async ([enabled]) => {
     autostart.checked = enabled;
@@ -345,7 +412,7 @@ if (isOverlay) {
       await refreshVisibility();
     }
   });
-  void applyShortcut(settings.shortcut).catch(() => { shortcutValue.textContent = "快捷键注册失败"; });
+  void applyShortcut(settings.shortcut).catch(() => { void restoreDefaultShortcut(); });
   renderDisplayTarget();
   void applySchedule();
   window.setInterval(() => { void applySchedule(); }, 30_000);
